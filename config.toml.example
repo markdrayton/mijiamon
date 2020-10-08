@@ -1,0 +1,17 @@
+timeout = 10
+interval = 60
+
+[database]
+host = "localhost"
+port = 8086
+user = "home"
+pass = "p4ssw0rd"
+name = "home"
+
+[[sensors]]
+mac = "58:2d:34:00:11:22"
+name = "main-bedroom"
+
+[[sensors]]
+mac = "58:2d:34:aa:bb:cc"
+name = "study"
