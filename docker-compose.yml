@@ -1,0 +1,8 @@
+version: "3"
+services:
+  mijiamon:
+    container_name: mijiamon
+    image: mijiamon:latest
+    network_mode: host  # bluetooth access
+    privileged: true    # bluetooth access
+    restart: unless-stopped
