@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -72,7 +71,7 @@ func (s *Sensor) readBatteryLevel(c ble.Client, p *ble.Profile) (int, error) {
 	return int(b[0]), nil
 }
 
-func (s *Sensor) readTemperatureAndHumidity(c ble.Client, p *ble.Profile) ([2]float64, error) {
+func (s *Sensor) readTemperatureAndHumidity(ctx context.Context, c ble.Client, p *ble.Profile) ([2]float64, error) {
 	ch := make(chan []byte)
 
 	chr := p.Find(ble.NewCharacteristic(temperatureAndHumidityUUID))
@@ -96,8 +95,8 @@ func (s *Sensor) readTemperatureAndHumidity(c ble.Client, p *ble.Profile) ([2]fl
 			}
 			res[i] = v
 		}
-	case <-time.After(s.Timeout):
-		return res, errors.New("timed out waiting for notification")
+	case <-ctx.Done():
+		return res, ctx.Err()
 	}
 
 	return res, nil
@@ -108,33 +107,39 @@ func (s *Sensor) poll(results chan Result) {
 	defer mutex.Unlock()
 
 	start := time.Now()
-
-	addr := ble.NewAddr(s.Mac)
+	done := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
 	defer cancel()
 
+	addr := ble.NewAddr(s.Mac)
 	client, err := ble.Dial(ctx, addr)
+	log.Printf("%s: connecting\n", s.Name)
 	if err != nil {
 		log.Printf("Error dialing %s: %s", s.Name, err)
 		return
 	}
-	defer client.CancelConnection()
+
+	go func() {
+		<-client.Disconnected()
+		log.Printf("%s: disconnected\n", s.Name)
+		close(done)
+	}()
 
 	profile, err := client.DiscoverProfile(true)
 	if err != nil {
-		log.Println(err)
+		log.Printf("%s: %s\n", s.Name, err)
 		return
 	}
 
 	pct, err := s.readBatteryLevel(client, profile)
 	if err != nil {
-		log.Println(err)
+		log.Printf("%s: %s\n", s.Name, err)
 		return
 	}
 
-	th, err := s.readTemperatureAndHumidity(client, profile)
+	th, err := s.readTemperatureAndHumidity(ctx, client, profile)
 	if err != nil {
-		log.Println(err)
+		log.Printf("%s: %s\n", s.Name, err)
 		return
 	}
 
@@ -146,6 +151,9 @@ func (s *Sensor) poll(results chan Result) {
 		BatteryPct:   pct,
 		PollDuration: time.Now().Sub(start),
 	}
+
+	client.CancelConnection()
+	<-done
 }
 
 func (s *Sensor) Run(results chan Result) {
@@ -164,6 +172,8 @@ func init() {
 }
 
 func main() {
+	log.SetFlags(log.Ldate | log.Lmicroseconds)
+
 	var conf Config
 	_, err := toml.DecodeFile("config.toml", &conf)
 	if err != nil {
