@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux"
 	"github.com/influxdata/influxdb-client-go/v2"
+	"github.com/markdrayton/ble"
+	"github.com/markdrayton/ble/linux"
 )
 
 var (
