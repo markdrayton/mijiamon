@@ -113,7 +113,6 @@ func (s *Sensor) poll(results chan Result) {
 
 	addr := ble.NewAddr(s.Mac)
 	client, err := ble.Dial(ctx, addr)
-	log.Printf("%s: connecting\n", s.Name)
 	if err != nil {
 		log.Printf("Error dialing %s: %s", s.Name, err)
 		return
@@ -121,7 +120,6 @@ func (s *Sensor) poll(results chan Result) {
 
 	go func() {
 		<-client.Disconnected()
-		log.Printf("%s: disconnected\n", s.Name)
 		close(done)
 	}()
 
