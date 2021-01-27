@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,6 +173,10 @@ func init() {
 
 func main() {
 	log.SetFlags(log.Ldate | log.Lmicroseconds)
+
+	go func() {
+		log.Println(http.ListenAndServe(":6060", nil))
+	}()
 
 	var conf Config
 	_, err := toml.DecodeFile("config.toml", &conf)
