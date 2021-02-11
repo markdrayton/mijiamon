@@ -202,25 +202,36 @@ func main() {
 		go sensor.Run(results)
 	}
 
+	tmo := 3 * time.Minute
+	watchdog, cancel := context.WithTimeout(context.Background(), tmo)
+
 	for {
-		r := <-results
-		log.Printf("%+v\n", r)
-		p := influxdb2.NewPoint(
-			"environment",
-			map[string]string{
-				"name": r.Name,
-			},
-			map[string]interface{}{
-				"temperature":      r.Temperature,
-				"humidity":         r.Humidity,
-				"battery_pct":      r.BatteryPct,
-				"poll_duration_ms": r.PollDuration.Milliseconds(),
-			},
-			r.Time,
-		)
-		err := writeAPI.WritePoint(context.Background(), p)
-		if err != nil {
-			fmt.Printf("Write error: %s\n", err.Error())
+		select {
+		case <-watchdog.Done():
+			log.Fatalf("no results in %s, aborting", tmo)
+		case r := <-results:
+			// reset watchdog
+			cancel()
+			watchdog, cancel = context.WithTimeout(context.Background(), tmo)
+
+			log.Printf("%+v\n", r)
+			p := influxdb2.NewPoint(
+				"environment",
+				map[string]string{
+					"name": r.Name,
+				},
+				map[string]interface{}{
+					"temperature":      r.Temperature,
+					"humidity":         r.Humidity,
+					"battery_pct":      r.BatteryPct,
+					"poll_duration_ms": r.PollDuration.Milliseconds(),
+				},
+				r.Time,
+			)
+			err := writeAPI.WritePoint(context.Background(), p)
+			if err != nil {
+				fmt.Printf("Write error: %s\n", err.Error())
+			}
 		}
 	}
 }
