@@ -2,46 +2,26 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/hex"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/influxdata/influxdb-client-go/v2"
-	"github.com/markdrayton/ble"
-	"github.com/markdrayton/ble/linux"
+	"github.com/go-ble/ble"
+	"github.com/go-ble/ble/linux"
+	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 )
 
-var (
-	temperatureAndHumidityUUID = ble.MustParse("226caa5564764566756266734470666d")
-	batteryPctUUID             = ble.UUID16(0x2a19)
-	mutex                      = &sync.Mutex{} // ble library isn't thread-safe
-)
-
-type Sensor struct {
-	Mac      string
-	Name     string
-	Timeout  time.Duration
-	Interval time.Duration
-}
-
-type Result struct {
-	Name         string
-	Time         time.Time
-	Temperature  float64
-	Humidity     float64
-	BatteryPct   int
-	PollDuration time.Duration
-}
+type Data map[string]interface{}
 
 type Config struct {
-	Timeout  int
-	Interval int
 	Database struct {
 		Host string
 		Port int
@@ -52,134 +32,137 @@ type Config struct {
 	Sensors []struct {
 		Mac  string
 		Name string
+		Type string
 	}
 }
 
-func NewSensor(mac, name string, timeout, interval time.Duration) *Sensor {
-	return &Sensor{
-		Mac:      mac,
-		Name:     name,
-		Timeout:  timeout,
-		Interval: interval,
+type sensor struct {
+	name      string
+	data      Data
+	mu        *sync.Mutex
+	processor func([]byte) Data
+}
+
+func newSensor(name string, processor func([]byte) Data) *sensor {
+	return &sensor{
+		name:      name,
+		data:      make(Data),
+		mu:        &sync.Mutex{},
+		processor: processor,
 	}
 }
 
-func (s *Sensor) readBatteryLevel(c ble.Client, p *ble.Profile) (int, error) {
-	chr := p.Find(ble.NewCharacteristic(batteryPctUUID))
-	b, err := c.ReadCharacteristic(chr.(*ble.Characteristic))
-	if err != nil {
-		return 0, err
+func (s *sensor) processAdv(b []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.processor(b) {
+		s.data[k] = v
 	}
-	return int(b[0]), nil
 }
 
-func (s *Sensor) readTemperatureAndHumidity(ctx context.Context, c ble.Client, p *ble.Profile) ([2]float64, error) {
-	ch := make(chan []byte)
+func (s *sensor) flush() Data {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ret := make(Data)
+	for k, v := range s.data {
+		ret[k] = v
+	}
+	s.data = make(Data)
+	return ret
+}
 
-	chr := p.Find(ble.NewCharacteristic(temperatureAndHumidityUUID))
-	c.Subscribe(chr.(*ble.Characteristic), false, func(req []byte) {
-		ch <- req
-	})
-	defer c.Unsubscribe(chr.(*ble.Characteristic), false)
-
-	res := [2]float64{}
-
-	select {
-	case req := <-ch:
-		// T=23.7 H=55.2
-		data := strings.Trim(string(req), "\x00")
-		pairs := strings.Split(data, " ")
-		for i, pair := range pairs {
-			parts := strings.Split(pair, "=")
-			v, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return res, err
-			}
-			res[i] = v
+func processAdvLYWSD03MMC(b []byte) Data {
+	// assumes https://github.com/pvvx/ATC_MiThermometer firmware
+	if len(b) == 15 {
+		return Data{
+			"temperature": float64(int16(binary.LittleEndian.Uint16(b[6:8]))) / 100,
+			"humidity":    float64(binary.LittleEndian.Uint16(b[8:10])) / 100,
+			"battery_pct": int(b[12]),
 		}
-	case <-ctx.Done():
-		return res, ctx.Err()
 	}
-
-	return res, nil
+	return Data{}
 }
 
-func (s *Sensor) poll(results chan Result) {
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	start := time.Now()
-	done := make(chan struct{})
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
-	defer cancel()
-
-	addr := ble.NewAddr(s.Mac)
-	client, err := ble.Dial(ctx, addr)
-	if err != nil {
-		log.Printf("Error dialing %s: %s", s.Name, err)
-		return
+func processAdvLYWSDCGQ(b []byte) Data {
+	switch int(b[13]) {
+	case 0x01:
+		return Data{
+			"battery_pct": int(b[14]),
+		}
+	case 0x04:
+		return Data{
+			"temperature": float64(int16(binary.LittleEndian.Uint16(b[14:16]))) / 10,
+			"humidity":    float64(binary.LittleEndian.Uint16(b[16:18])) / 10,
+		}
 	}
-
-	go func() {
-		<-client.Disconnected()
-		close(done)
-	}()
-
-	profile, err := client.DiscoverProfile(true)
-	if err != nil {
-		log.Printf("%s: %s\n", s.Name, err)
-		return
-	}
-
-	pct, err := s.readBatteryLevel(client, profile)
-	if err != nil {
-		log.Printf("%s: %s\n", s.Name, err)
-		return
-	}
-
-	th, err := s.readTemperatureAndHumidity(ctx, client, profile)
-	if err != nil {
-		log.Printf("%s: %s\n", s.Name, err)
-		return
-	}
-
-	results <- Result{
-		Name:         s.Name,
-		Time:         start,
-		Temperature:  th[0],
-		Humidity:     th[1],
-		BatteryPct:   pct,
-		PollDuration: time.Now().Sub(start),
-	}
-
-	client.CancelConnection()
-	<-done
+	return Data{}
 }
 
-func (s *Sensor) Run(results chan Result) {
-	ticker := time.NewTicker(s.Interval)
-	for ; true; <-ticker.C {
-		s.poll(results)
-	}
-}
+var (
+	configFile string
+	dryRun     bool
+	verbose    bool
+	sensors    map[string]*sensor
+)
 
 func init() {
+	log.SetFlags(log.Ldate | log.Lmicroseconds)
+
 	d, err := linux.NewDevice()
 	if err != nil {
 		log.Fatal("Can't create new device:", err)
 	}
 	ble.SetDefaultDevice(d)
+
+	flag.StringVar(&configFile, "c", "config.toml", "config file path")
+	flag.BoolVar(&dryRun, "n", false, "dry run mode")
+	flag.BoolVar(&verbose, "v", false, "verbose logginge")
+	flag.Parse()
+
+	sensors = make(map[string]*sensor)
+}
+
+func vlog(fmt string, a ...interface{}) {
+	if verbose {
+		log.Printf(fmt, a...)
+	}
+}
+
+func formatHex(b []byte) string {
+	h := hex.EncodeToString(b)
+	out := ""
+	i := 0
+	for i < len(h) {
+		out += h[i : i+2]
+		i += 2
+		if i != len(h) {
+			out += " "
+		}
+	}
+	return out
+}
+
+func advHandler(a ble.Advertisement) {
+	s := sensors[a.Addr().String()]
+	for _, sd := range a.ServiceData() {
+		vlog("adv: %s, UUID: %s, data (len %d): %s",
+			s.name, sd.UUID.String(), len(sd.Data), formatHex(sd.Data))
+		s.processAdv(sd.Data)
+	}
+}
+
+func advFilter(a ble.Advertisement) bool {
+	_, ok := sensors[a.Addr().String()]
+	return ok
 }
 
 func main() {
-	log.SetFlags(log.Ldate | log.Lmicroseconds)
-
 	go func() {
 		log.Println(http.ListenAndServe(":6060", nil))
 	}()
 
 	var conf Config
-	_, err := toml.DecodeFile("config.toml", &conf)
+	_, err := toml.DecodeFile(configFile, &conf)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -188,50 +171,45 @@ func main() {
 	client := influxdb2.NewClient(url, conf.Database.User+":"+conf.Database.Pass)
 	writeAPI := client.WriteAPIBlocking("", conf.Database.Name)
 
-	results := make(chan Result)
-
-	var sensors []*Sensor
 	for _, s := range conf.Sensors {
-		sensor := NewSensor(
-			s.Mac,
-			s.Name,
-			time.Duration(conf.Timeout)*time.Second,
-			time.Duration(conf.Interval)*time.Second,
-		)
-		sensors = append(sensors, sensor)
-		go sensor.Run(results)
-	}
-
-	tmo := 3 * time.Minute
-	watchdog, cancel := context.WithTimeout(context.Background(), tmo)
-
-	for {
-		select {
-		case <-watchdog.Done():
-			log.Fatalf("no results in %s, aborting", tmo)
-		case r := <-results:
-			// reset watchdog
-			cancel()
-			watchdog, cancel = context.WithTimeout(context.Background(), tmo)
-
-			log.Printf("%+v\n", r)
-			p := influxdb2.NewPoint(
-				"environment",
-				map[string]string{
-					"name": r.Name,
-				},
-				map[string]interface{}{
-					"temperature":      r.Temperature,
-					"humidity":         r.Humidity,
-					"battery_pct":      r.BatteryPct,
-					"poll_duration_ms": r.PollDuration.Milliseconds(),
-				},
-				r.Time,
-			)
-			err := writeAPI.WritePoint(context.Background(), p)
-			if err != nil {
-				fmt.Printf("Write error: %s\n", err.Error())
-			}
+		mac := strings.ToLower(s.Mac)
+		switch s.Type {
+		case "LYWSD03MMC":
+			sensors[mac] = newSensor(s.Name, processAdvLYWSD03MMC)
+		case "LYWSDCGQ/01ZM":
+			sensors[mac] = newSensor(s.Name, processAdvLYWSDCGQ)
+		default:
+			log.Fatalf("unknown sensor type %s", s.Type)
 		}
 	}
+
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		for {
+			<-ticker.C
+			for _, s := range sensors {
+				fields := s.flush()
+				log.Printf("%s %+v\n", s.name, fields)
+				if !dryRun && len(fields) > 0 {
+					p := influxdb2.NewPoint(
+						"environment",
+						map[string]string{
+							"name": s.name,
+						},
+						fields,
+						time.Now(),
+					)
+					err := writeAPI.WritePoint(context.Background(), p)
+					if err != nil {
+						fmt.Printf("Write error: %s\n", err.Error())
+					}
+				}
+			}
+		}
+	}()
+
+	log.Print("starting scan")
+
+	ctx := ble.WithSigHandler(context.WithCancel(context.Background()))
+	ble.Scan(ctx, true, advHandler, advFilter)
 }
