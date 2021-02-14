@@ -1,9 +1,12 @@
-FROM golang:1-alpine
+FROM golang:1-buster
 
-WORKDIR /go/src/app
+RUN apt-get update
+RUN apt-get install -y bluetooth bluez usbutils
+
+WORKDIR /app
 COPY . .
 
 RUN go get -d -v ./...
 RUN go install -v ./...
 
-CMD ["mijiamon"]
+ENTRYPOINT ["/bin/bash", "entrypoint.sh"]

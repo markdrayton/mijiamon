@@ -3,6 +3,9 @@ services:
   mijiamon:
     container_name: mijiamon
     image: mijiamon:latest
+    volumes:
+      - "./config:/app/config"
     network_mode: host  # bluetooth access
     privileged: true    # bluetooth access
     restart: unless-stopped
+    command: ["-c", "config/config.toml"]
