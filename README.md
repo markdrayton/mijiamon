@@ -1,6 +1,6 @@
 # mijiamon
 
-Poll Xiaomi Mijia temperature/humidity sensors (specifically, models LYWSD03MMC and LYWSDCGQ/01ZM), send data to InfluxDB.
+Listen for temperature/humidity advertisements from Xiaomi Mijia sensors (specifically, models LYWSD03MMC and LYWSDCGQ/01ZM), send data to InfluxDB.
 
 ## Building/installing
 
