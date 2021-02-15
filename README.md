@@ -1,6 +1,6 @@
 # mijiamon
 
-Poll Xiaomi Mijia temperature/humidity sensors, send data to InfluxDB.
+Poll Xiaomi Mijia temperature/humidity sensors (specifically, models LYWSD03MMC and LYWSDCGQ/01ZM), send data to InfluxDB.
 
 ## Building/installing
 
@@ -21,7 +21,3 @@ $ docker run --network host --privileged --rm --name mijiamon mijiamon
 ```
 
 (`--privileged` to access `hci0` etc; could probably be improved)
-
-## Bugs
-
-Not really a bug but `go-ble` doesn't support more than one client at a time so attempting to poll a lot of devices with long timeouts and a short polling interval won't work.
