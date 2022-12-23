@@ -1,4 +1,4 @@
-module mijiamon
+module github.com/markdrayton/mijiamon
 
 go 1.15
 
